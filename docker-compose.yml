@@ -1,0 +1,122 @@
+x-app-image: &app-image user-activity-app:local
+
+x-app-env: &app-env
+  NODE_ENV: production
+  LOG_LEVEL: info
+  DATABASE_URL: postgresql://${POSTGRES_USER:-app}:${POSTGRES_PASSWORD:-app}@postgres:5432/${POSTGRES_DB:-user_activity_tracking}?schema=public
+  REDIS_HOST: redis
+  REDIS_PORT: 6379
+
+services:
+  postgres:
+    image: postgres:16-alpine@sha256:93d55776e04376e19adb2733e3ccebb4392ee7dd86d8ff238503b30fe719c84f
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-user_activity_tracking}
+      POSTGRES_USER: ${POSTGRES_USER:-app}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-app}
+    ports:
+      - '127.0.0.1:5432:5432'
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB']
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine@sha256:efc27681bf81e6ed55cb581718b7818c6c04c39b1f9aa40854edd3ea2241b6ed
+    restart: unless-stopped
+    command: redis-server --appendonly yes
+    ports:
+      - '127.0.0.1:6379:6379'
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ['CMD', 'redis-cli', 'ping']
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  migrate:
+    image: *app-image
+    build:
+      context: .
+      dockerfile: docker/app.Dockerfile
+    restart: 'no'
+    init: true
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      <<: *app-env
+    command: sh -c "npm run prisma:migrate:deploy && npm run db:seed"
+
+  api:
+    image: *app-image
+    restart: unless-stopped
+    init: true
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    environment:
+      <<: *app-env
+      APP_PORT: 3000
+      ACTIVITY_MAX_PERIOD_DAYS: ${ACTIVITY_MAX_PERIOD_DAYS:-31}
+      SCHEDULER_CRON: ${SCHEDULER_CRON:-* * * * *}
+    ports:
+      - '3000:3000'
+    healthcheck:
+      test:
+        [
+          'CMD',
+          'node',
+          '-e',
+          "fetch('http://127.0.0.1:3000/health/readiness').then((response) => process.exit(response.ok ? 0 : 1)).catch(() => process.exit(1))",
+        ]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    command: npm run start:prod
+
+  worker:
+    image: *app-image
+    restart: unless-stopped
+    init: true
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    environment:
+      <<: *app-env
+    command: npm run start:worker
+
+  scheduler:
+    image: *app-image
+    restart: unless-stopped
+    init: true
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    environment:
+      <<: *app-env
+      SCHEDULER_CRON: ${SCHEDULER_CRON:-* * * * *}
+      SCHEDULER_BATCH_SIZE: ${SCHEDULER_BATCH_SIZE:-50}
+    command: npm run start:scheduler
+
+volumes:
+  postgres_data:
+  redis_data:

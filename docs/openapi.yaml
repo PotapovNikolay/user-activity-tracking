@@ -1,0 +1,384 @@
+openapi: 3.0.3
+info:
+  title: User Activity Tracking API
+  version: 1.0.0
+  description: API для чтения профиля пользователя, истории активности и health-check эндпоинтов.
+
+servers:
+  - url: http://localhost:3000
+
+tags:
+  - name: Health
+  - name: Users
+  - name: Activity
+
+paths:
+  /health/liveness:
+    get:
+      tags:
+        - Health
+      summary: Проверка, что приложение запущено
+      operationId: getLiveness
+      responses:
+        '200':
+          description: Приложение работает
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LivenessResponse'
+
+  /health/readiness:
+    get:
+      tags:
+        - Health
+      summary: Проверка готовности PostgreSQL и Redis
+      operationId: getReadiness
+      responses:
+        '200':
+          description: Все зависимости доступны
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ReadinessResponse'
+        '503':
+          description: Одна или несколько зависимостей недоступны
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ReadinessResponse'
+
+  /users/{id}:
+    get:
+      tags:
+        - Users
+      summary: Получить профиль пользователя по id
+      operationId: getUserProfile
+      parameters:
+        - name: id
+          in: path
+          required: true
+          description: UUID пользователя
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Профиль пользователя
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UserProfileResponse'
+        '400':
+          description: Невалидный UUID
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DefaultBadRequestError'
+        '404':
+          description: Пользователь не найден
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NotFoundError'
+
+  /users/{userId}/activity:
+    get:
+      tags:
+        - Activity
+      summary: Получить активность пользователя за период
+      operationId: getUserActivity
+      parameters:
+        - name: userId
+          in: path
+          required: true
+          description: UUID пользователя
+          schema:
+            type: string
+            format: uuid
+        - name: from
+          in: query
+          required: true
+          description: Начало периода в ISO-8601 с таймзоной
+          schema:
+            type: string
+            format: date-time
+            example: '2026-04-01T00:00:00.000Z'
+        - name: to
+          in: query
+          required: true
+          description: Конец периода в ISO-8601 с таймзоной
+          schema:
+            type: string
+            format: date-time
+            example: '2026-04-30T23:59:59.999Z'
+        - name: type
+          in: query
+          required: false
+          description: Фильтр по типу активности
+          schema:
+            type: string
+            enum:
+              - walking
+              - running
+              - workout
+        - name: limit
+          in: query
+          required: false
+          description: Размер страницы
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 50
+        - name: cursor
+          in: query
+          required: false
+          description: Курсор следующей страницы
+          schema:
+            type: string
+            maxLength: 128
+            example: '2026-04-17T09:30:00.000Z|550e8400-e29b-41d4-a716-446655440000'
+      responses:
+        '200':
+          description: Страница активности пользователя
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ActivityPeriodResponse'
+        '400':
+          description: Невалидный path/query input
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: '#/components/schemas/DefaultBadRequestError'
+                  - $ref: '#/components/schemas/ValidationFailedError'
+        '404':
+          description: Пользователь не найден
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NotFoundError'
+
+components:
+  schemas:
+    LivenessResponse:
+      type: object
+      required:
+        - status
+        - service
+      properties:
+        status:
+          type: string
+          example: ok
+        service:
+          type: string
+          example: user-activity-tracking
+
+    ReadinessResponse:
+      type: object
+      required:
+        - status
+      properties:
+        status:
+          type: string
+          example: ok
+        info:
+          type: object
+          additionalProperties: true
+          nullable: true
+        error:
+          type: object
+          additionalProperties: true
+          nullable: true
+        details:
+          type: object
+          additionalProperties: true
+
+    UserProfileResponse:
+      type: object
+      required:
+        - id
+        - email
+        - name
+        - timezone
+        - isActive
+        - createdAt
+        - updatedAt
+      properties:
+        id:
+          type: string
+          format: uuid
+          example: '550e8400-e29b-41d4-a716-446655440000'
+        email:
+          type: string
+          example: 'alice@example.com'
+        name:
+          type: string
+          nullable: true
+          example: Alice
+        timezone:
+          type: string
+          example: Europe/Moscow
+        isActive:
+          type: boolean
+          example: true
+        createdAt:
+          type: string
+          format: date-time
+          example: '2026-04-17T08:00:00.000Z'
+        updatedAt:
+          type: string
+          format: date-time
+          example: '2026-04-19T09:15:00.000Z'
+
+    ActivityItemResponse:
+      type: object
+      required:
+        - id
+        - type
+        - source
+        - startedAt
+        - endedAt
+        - durationSeconds
+        - summary
+        - createdAt
+      properties:
+        id:
+          type: string
+          format: uuid
+          example: '550e8400-e29b-41d4-a716-446655440001'
+        type:
+          type: string
+          enum:
+            - walking
+            - running
+            - workout
+          example: running
+        source:
+          type: string
+          example: system
+        startedAt:
+          type: string
+          format: date-time
+          example: '2026-04-17T09:30:00.000Z'
+        endedAt:
+          type: string
+          format: date-time
+          example: '2026-04-17T10:10:00.000Z'
+        durationSeconds:
+          type: integer
+          example: 2400
+        summary:
+          nullable: true
+          oneOf:
+            - type: object
+              additionalProperties: true
+              example:
+                steps: 5300
+                calories: 410
+                distanceMeters: 6200
+                avgHeartRate: 128
+                maxHeartRate: 171
+            - type: array
+              items: {}
+            - type: string
+            - type: number
+            - type: boolean
+        createdAt:
+          type: string
+          format: date-time
+          example: '2026-04-17T10:10:00.000Z'
+
+    ActivityPeriodResponse:
+      type: object
+      required:
+        - userId
+        - from
+        - to
+        - items
+      properties:
+        userId:
+          type: string
+          format: uuid
+          example: '550e8400-e29b-41d4-a716-446655440000'
+        from:
+          type: string
+          format: date-time
+          example: '2026-04-01T00:00:00.000Z'
+        to:
+          type: string
+          format: date-time
+          example: '2026-04-30T23:59:59.999Z'
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/ActivityItemResponse'
+        nextCursor:
+          type: string
+          nullable: true
+          example: '2026-04-17T09:30:00.000Z|550e8400-e29b-41d4-a716-446655440000'
+
+    ValidationFailedError:
+      type: object
+      required:
+        - code
+        - details
+      properties:
+        code:
+          type: string
+          example: VALIDATION_FAILED
+        details:
+          type: array
+          items:
+            $ref: '#/components/schemas/ValidationErrorDetail'
+
+    ValidationErrorDetail:
+      type: object
+      required:
+        - field
+        - constraints
+      properties:
+        field:
+          type: string
+          example: limit
+        constraints:
+          type: array
+          items:
+            type: string
+          example:
+            - limit must not be greater than 100
+
+    DefaultBadRequestError:
+      type: object
+      required:
+        - message
+        - error
+        - statusCode
+      properties:
+        message:
+          type: string
+          example: Validation failed (uuid is expected)
+        error:
+          type: string
+          example: Bad Request
+        statusCode:
+          type: integer
+          example: 400
+
+    NotFoundError:
+      type: object
+      required:
+        - message
+        - error
+        - statusCode
+      properties:
+        message:
+          type: string
+          example: User with id 550e8400-e29b-41d4-a716-446655440000 was not found
+        error:
+          type: string
+          example: Not Found
+        statusCode:
+          type: integer
+          example: 404

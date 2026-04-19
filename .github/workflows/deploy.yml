@@ -1,0 +1,131 @@
+name: Deploy
+
+on:
+  push:
+    branches:
+      - develop
+      - staging
+      - main
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: Git branch to deploy
+        required: true
+        default: develop
+        type: choice
+        options:
+          - develop
+          - staging
+          - main
+
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    outputs:
+      deploy_branch: ${{ steps.resolve.outputs.deploy_branch }}
+      deploy_environment: ${{ steps.resolve.outputs.deploy_environment }}
+
+    steps:
+      - name: Resolve deploy branch and environment
+        id: resolve
+        shell: bash
+        env:
+          INPUT_REF: ${{ inputs.ref }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+
+          DEPLOY_BRANCH="${INPUT_REF:-$REF_NAME}"
+
+          case "${DEPLOY_BRANCH}" in
+            develop)
+              DEPLOY_ENVIRONMENT="develop"
+              ;;
+            staging)
+              DEPLOY_ENVIRONMENT="staging"
+              ;;
+            main)
+              DEPLOY_ENVIRONMENT="production"
+              ;;
+            *)
+              echo "Unsupported deploy branch: ${DEPLOY_BRANCH}"
+              echo "Supported branches: develop, staging, main"
+              exit 1
+              ;;
+          esac
+
+          echo "deploy_branch=${DEPLOY_BRANCH}" >> "${GITHUB_OUTPUT}"
+          echo "deploy_environment=${DEPLOY_ENVIRONMENT}" >> "${GITHUB_OUTPUT}"
+
+  deploy:
+    name: Deploy to ${{ needs.prepare.outputs.deploy_environment }}
+    runs-on: ubuntu-latest
+    needs: prepare
+    environment: ${{ needs.prepare.outputs.deploy_environment }}
+    concurrency:
+      group: deploy-${{ needs.prepare.outputs.deploy_environment }}
+      cancel-in-progress: false
+    env:
+      DEPLOY_BRANCH: ${{ needs.prepare.outputs.deploy_branch }}
+      VPS_HOST: ${{ secrets.VPS_HOST }}
+      VPS_PORT: ${{ secrets.VPS_PORT }}
+      VPS_USER: ${{ secrets.VPS_USER }}
+      VPS_APP_DIR: ${{ secrets.VPS_APP_DIR }}
+      VPS_SSH_KEY: ${{ secrets.VPS_SSH_KEY }}
+
+    steps:
+      - name: Validate deploy secrets
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -n "${VPS_HOST}" || { echo "Missing secret: VPS_HOST"; exit 1; }
+          test -n "${VPS_USER}" || { echo "Missing secret: VPS_USER"; exit 1; }
+          test -n "${VPS_APP_DIR}" || { echo "Missing secret: VPS_APP_DIR"; exit 1; }
+          test -n "${VPS_SSH_KEY}" || { echo "Missing secret: VPS_SSH_KEY"; exit 1; }
+          if [ -z "${VPS_PORT}" ]; then
+            echo "VPS_PORT=22" >> "${GITHUB_ENV}"
+          fi
+
+      - name: Configure SSH
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "${HOME}/.ssh"
+          printf '%s\n' "${VPS_SSH_KEY}" > "${HOME}/.ssh/id_ed25519"
+          chmod 600 "${HOME}/.ssh/id_ed25519"
+          ssh-keyscan -p "${VPS_PORT}" "${VPS_HOST}" >> "${HOME}/.ssh/known_hosts"
+
+      - name: Deploy application
+        shell: bash
+        run: |
+          set -euo pipefail
+          ssh -p "${VPS_PORT}" "${VPS_USER}@${VPS_HOST}" /bin/bash <<EOF
+          set -euo pipefail
+          cd "${VPS_APP_DIR}"
+
+          git fetch origin "${DEPLOY_BRANCH}" --prune
+          if git show-ref --verify --quiet "refs/heads/${DEPLOY_BRANCH}"; then
+            git checkout "${DEPLOY_BRANCH}"
+          else
+            git checkout -b "${DEPLOY_BRANCH}" "origin/${DEPLOY_BRANCH}"
+          fi
+          git pull --ff-only origin "${DEPLOY_BRANCH}"
+
+          docker compose pull postgres redis || true
+          docker compose up -d postgres redis
+          docker compose build migrate api worker scheduler
+          docker compose run --rm migrate
+          docker compose up -d api worker scheduler --remove-orphans
+          docker compose ps --status running api worker scheduler
+          for attempt in $(seq 1 20); do
+            if docker compose exec -T api node -e "fetch('http://127.0.0.1:3000/health/readiness').then((response) => process.exit(response.ok ? 0 : 1)).catch(() => process.exit(1))"; then
+              break
+            fi
+            if [ "${attempt}" -eq 20 ]; then
+              echo "API readiness smoke check failed"
+              exit 1
+            fi
+            sleep 3
+          done
+          docker image prune -f
+          EOF

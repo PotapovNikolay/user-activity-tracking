@@ -1,0 +1,40 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+model User {
+  id         String     @id @default(uuid()) @db.Uuid
+  email      String     @unique
+  name       String?
+  timezone   String     @default("UTC") @map("timezone")
+  isActive   Boolean    @default(true) @map("is_active")
+  createdAt  DateTime   @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt  DateTime   @updatedAt @map("updated_at") @db.Timestamptz(6)
+  activities Activity[]
+
+  @@index([isActive, createdAt, id])
+  @@map("users")
+}
+
+model Activity {
+  id              String   @id @default(uuid()) @db.Uuid
+  userId          String   @map("user_id") @db.Uuid
+  type            String
+  source          String
+  startedAt       DateTime @map("started_at") @db.Timestamptz(6)
+  endedAt         DateTime @map("ended_at") @db.Timestamptz(6)
+  durationSeconds Int      @map("duration_seconds")
+  summary         Json?    @db.JsonB
+  createdAt       DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, startedAt(sort: Desc), id(sort: Desc)])
+  @@index([userId, type, startedAt(sort: Desc), id(sort: Desc)])
+  @@unique([userId, source, type, endedAt])
+  @@map("activities")
+}
